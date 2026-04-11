@@ -21,7 +21,7 @@ pick_codesign_identity() {
   identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
 
   while IFS= read -r candidate; do
-    if grep -Fq "\"$candidate\"" <<<"$identities"; then
+    if grep -Fq "\"$candidate" <<<"$identities"; then
       printf '%s\n' "$candidate"
       return
     fi
@@ -50,7 +50,12 @@ sync_frameworks_into_bundle() {
 
   for fw in "$source_dir"/*.framework; do
     [[ -e "$fw" ]] || continue
-    rsync -aL --delete "$fw" "$bundle_fw_dir/"
+    local fw_name
+    local resolved_fw
+    fw_name="$(basename "$fw")"
+    resolved_fw="$(realpath "$fw")"
+    rm -rf "$bundle_fw_dir/$fw_name"
+    rsync -a --delete "$resolved_fw/" "$bundle_fw_dir/$fw_name/"
   done
 }
 
@@ -135,7 +140,7 @@ cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
 PLIST
 
 # Re-sign the bundle so TCC can identify the dev build consistently.
-codesign --force --sign "$CODESIGN_IDENTITY" --deep "$APP_BUNDLE" 2>/dev/null || true
+codesign --force --sign "$CODESIGN_IDENTITY" --deep "$APP_BUNDLE"
 
 echo "[3/5] Stopping existing MacParakeet processes…"
 pkill -f "/Applications/MacParakeet.app/Contents/MacOS/MacParakeet" || true
