@@ -88,6 +88,10 @@ public final class LLMSettingsViewModel {
         draft.requiresAPIKey
     }
 
+    public var supportsAPIKey: Bool {
+        draft.supportsAPIKey
+    }
+
     public var availableModels: [String] {
         guard let providerID = draft.providerID else { return [] }
         if providerID == .lmstudio {
@@ -193,7 +197,7 @@ public final class LLMSettingsViewModel {
     }
 
     public var canToggleAIFormatter: Bool {
-        draft.providerID != nil && isConfigured
+        draft.providerID != nil && draft.providerID == savedProviderID
     }
 
     public var aiFormatterStatusText: String {
@@ -207,9 +211,16 @@ public final class LLMSettingsViewModel {
         if !isConfigured {
             return "Save your AI provider first. Formatter changes apply immediately after that."
         }
+        if draft.providerID != savedProviderID {
+            return "Save this provider first. Formatter changes apply immediately after that."
+        }
         return nil
     }
 
+    private var savedProviderID: LLMProviderID? {
+        guard let configStore else { return nil }
+        return (try? configStore.loadConfig())?.id
+    }
     public var canResetAIFormatterPrompt: Bool {
         draft.aiFormatterPrompt != AIFormatter.defaultPromptTemplate
     }
@@ -326,7 +337,7 @@ public final class LLMSettingsViewModel {
         }
         let currentProvider = draft.providerID
         let apiKey: String
-        if let currentProvider, currentProvider.requiresAPIKey {
+        if let currentProvider, currentProvider.supportsAPIKey {
             apiKey = (try? configStore.loadAPIKey(for: currentProvider)) ?? ""
         } else {
             apiKey = ""
@@ -414,7 +425,7 @@ public final class LLMSettingsViewModel {
         if providerID != .lmstudio {
             resetDiscoveredModels()
         }
-        let apiKey = providerID.requiresAPIKey ? ((try? configStore?.loadAPIKey(for: providerID)) ?? "") : ""
+        let apiKey = providerID.supportsAPIKey ? ((try? configStore?.loadAPIKey(for: providerID)) ?? "") : ""
         let cliConfig = providerID == .localCLI ? cliConfigStore?.load() : nil
         var nextDraft = LLMSettingsDraft.defaults(
             for: providerID,
@@ -487,13 +498,11 @@ public final class LLMSettingsViewModel {
     }
 
     private func normalizeDiscoveredModels(_ models: [String]) -> [String] {
-        Array(
-            Set(
-                models.map {
-                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                }.filter { !$0.isEmpty }
-            )
-        ).sorted()
+        var seen = Set<String>()
+        return models
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert($0).inserted }
     }
 
     private func reconcileModelSelection(with models: [String], snapshot: LLMSettingsDraft) {

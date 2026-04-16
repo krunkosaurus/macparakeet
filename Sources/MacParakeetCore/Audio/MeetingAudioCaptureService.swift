@@ -56,7 +56,7 @@ public actor MeetingAudioCaptureService {
     private var eventContinuation: AsyncStream<MeetingAudioCaptureEvent>.Continuation?
     private var cachedEvents: AsyncStream<MeetingAudioCaptureEvent>?
 
-    public init(micProcessingMode: MeetingMicProcessingMode = .vpioPreferred) {
+    public init(micProcessingMode: MeetingMicProcessingMode = .raw) {
         self.microphoneCapture = MicrophoneCapture()
         self.micProcessingMode = micProcessingMode
         self.systemAudioTapFactory = {
@@ -70,7 +70,7 @@ public actor MeetingAudioCaptureService {
     init(
         microphoneCaptureFactory: @escaping MeetingMicrophoneCaptureFactory,
         systemAudioTapFactory: @escaping @Sendable () throws -> any MeetingSystemAudioTapping,
-        micProcessingMode: MeetingMicProcessingMode = .vpioPreferred
+        micProcessingMode: MeetingMicProcessingMode = .raw
     ) {
         self.microphoneCapture = microphoneCaptureFactory()
         self.systemAudioTapFactory = systemAudioTapFactory
@@ -80,7 +80,7 @@ public actor MeetingAudioCaptureService {
     init(
         microphoneCapture: any MeetingMicrophoneCapturing,
         systemAudioTapFactory: @escaping @Sendable () throws -> any MeetingSystemAudioTapping,
-        micProcessingMode: MeetingMicProcessingMode = .vpioPreferred
+        micProcessingMode: MeetingMicProcessingMode = .raw
     ) {
         self.microphoneCapture = microphoneCapture
         self.systemAudioTapFactory = systemAudioTapFactory
@@ -189,12 +189,24 @@ public actor MeetingAudioCaptureService {
     }
 
     private static func deepCopyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard let format = AVAudioFormat(
-            commonFormat: buffer.format.commonFormat,
-            sampleRate: buffer.format.sampleRate,
-            channels: buffer.format.channelCount,
-            interleaved: false
-        ), let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength) else {
+        let format: AVAudioFormat
+        if buffer.format.isInterleaved {
+            guard let nonInterleavedFormat = AVAudioFormat(
+                commonFormat: buffer.format.commonFormat,
+                sampleRate: buffer.format.sampleRate,
+                channels: buffer.format.channelCount,
+                interleaved: false
+            ) else {
+                return nil
+            }
+            format = nonInterleavedFormat
+        } else {
+            // Preserve channel layout details from Core Audio (for example VPIO
+            // multichannel formats) instead of reconstructing from channel count.
+            format = buffer.format
+        }
+
+        guard let copy = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: buffer.frameLength) else {
             return nil
         }
 

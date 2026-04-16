@@ -20,6 +20,8 @@ public enum TelemetryEventName: String, Sendable, CaseIterable {
     case llmPromptResultFailed = "llm_prompt_result_failed"
     case llmChatUsed = "llm_chat_used"
     case llmChatFailed = "llm_chat_failed"
+    case llmFormatterUsed = "llm_formatter_used"
+    case llmFormatterFailed = "llm_formatter_failed"
     case historySearched = "history_searched"
     case historyReplayed = "history_replayed"
     case copyToClipboard = "copy_to_clipboard"
@@ -112,6 +114,11 @@ public enum TelemetryCopySource: String, Sendable, Equatable {
     case discover
 }
 
+public enum TelemetryFormatterSource: String, Sendable, Equatable {
+    case dictation
+    case transcription
+}
+
 public enum TelemetryPermission: String, Sendable, Equatable {
     case microphone
     case accessibility
@@ -150,8 +157,7 @@ public enum TelemetryEventSpec: Sendable {
         wordCount: Int,
         speakerCount: Int? = nil,
         diarizationRequested: Bool,
-        diarizationApplied: Bool,
-        meetingPreparedTranscriptUsed: Bool? = nil
+        diarizationApplied: Bool
     )
     case transcriptionCancelled(
         source: TelemetryTranscriptionSource,
@@ -172,6 +178,23 @@ public enum TelemetryEventSpec: Sendable {
     case llmPromptResultFailed(provider: String, errorType: String, errorDetail: String? = nil)
     case llmChatUsed(provider: String, messageCount: Int)
     case llmChatFailed(provider: String, errorType: String, errorDetail: String? = nil)
+    case llmFormatterUsed(
+        provider: String,
+        source: TelemetryFormatterSource,
+        durationSeconds: Double,
+        inputChars: Int,
+        outputChars: Int,
+        defaultPromptUsed: Bool,
+        inputTruncated: Bool
+    )
+    case llmFormatterFailed(
+        provider: String,
+        source: TelemetryFormatterSource,
+        durationSeconds: Double,
+        errorType: String,
+        defaultPromptUsed: Bool,
+        inputTruncated: Bool
+    )
     case historySearched
     case historyReplayed
     case copyToClipboard(source: TelemetryCopySource)
@@ -253,6 +276,8 @@ extension TelemetryEventSpec {
         case .llmPromptResultFailed: return .llmPromptResultFailed
         case .llmChatUsed: return .llmChatUsed
         case .llmChatFailed: return .llmChatFailed
+        case .llmFormatterUsed: return .llmFormatterUsed
+        case .llmFormatterFailed: return .llmFormatterFailed
         case .historySearched: return .historySearched
         case .historyReplayed: return .historyReplayed
         case .copyToClipboard: return .copyToClipboard
@@ -363,8 +388,7 @@ extension TelemetryEventSpec {
             let wordCount,
             let speakerCount,
             let diarizationRequested,
-            let diarizationApplied,
-            let meetingPreparedTranscriptUsed
+            let diarizationApplied
         ):
             return Self.compactProps(
                 ("source", source.rawValue),
@@ -373,8 +397,7 @@ extension TelemetryEventSpec {
                 ("word_count", "\(wordCount)"),
                 ("speaker_count", speakerCount.map(String.init)),
                 ("diarization_requested", Self.boolString(diarizationRequested)),
-                ("diarization_applied", Self.boolString(diarizationApplied)),
-                ("meeting_prepared_transcript_used", meetingPreparedTranscriptUsed.map(Self.boolString))
+                ("diarization_applied", Self.boolString(diarizationApplied))
             )
         case .transcriptionCancelled(let source, let audioDurationSeconds, let stage):
             return Self.compactProps(
@@ -416,6 +439,40 @@ extension TelemetryEventSpec {
             var props = ["provider": provider, "error_type": errorType]
             if let errorDetail { props["error_detail"] = errorDetail }
             return props
+        case .llmFormatterUsed(
+            let provider,
+            let source,
+            let durationSeconds,
+            let inputChars,
+            let outputChars,
+            let defaultPromptUsed,
+            let inputTruncated
+        ):
+            return [
+                "provider": provider,
+                "source": source.rawValue,
+                "duration_seconds": Self.format(durationSeconds),
+                "input_chars": "\(inputChars)",
+                "output_chars": "\(outputChars)",
+                "default_prompt_used": Self.boolString(defaultPromptUsed),
+                "input_truncated": Self.boolString(inputTruncated),
+            ]
+        case .llmFormatterFailed(
+            let provider,
+            let source,
+            let durationSeconds,
+            let errorType,
+            let defaultPromptUsed,
+            let inputTruncated
+        ):
+            return [
+                "provider": provider,
+                "source": source.rawValue,
+                "duration_seconds": Self.format(durationSeconds),
+                "error_type": errorType,
+                "default_prompt_used": Self.boolString(defaultPromptUsed),
+                "input_truncated": Self.boolString(inputTruncated),
+            ]
         case .copyToClipboard(let source):
             return ["source": source.rawValue]
         case .processingModeChanged(let mode):
@@ -541,6 +598,8 @@ public enum TelemetryImplementedContract {
         .llmPromptResultFailed: ["provider", "error_type"],
         .llmChatUsed: ["provider", "message_count"],
         .llmChatFailed: ["provider", "error_type"],
+        .llmFormatterUsed: ["provider", "source", "duration_seconds", "input_chars", "output_chars", "default_prompt_used", "input_truncated"],
+        .llmFormatterFailed: ["provider", "source", "duration_seconds", "error_type", "default_prompt_used", "input_truncated"],
         .historySearched: [],
         .historyReplayed: [],
         .copyToClipboard: ["source"],

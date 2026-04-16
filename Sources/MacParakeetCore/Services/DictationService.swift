@@ -478,10 +478,38 @@ public actor DictationService: DictationServiceProtocol {
             return nil
         }
 
+        // Notify observers (e.g. the dictation flow coordinator) that the
+        // LLM formatter is about to run so the overlay pill can switch to
+        // its `.formatting` beat. We only post this *after* the guards
+        // above so "formatter disabled" dictations never flicker into the
+        // formatting visual.
+        NotificationCenter.default.post(
+            name: .macParakeetAIFormatterDidStart,
+            object: nil,
+            userInfo: ["source": "dictation"]
+        )
+        defer {
+            NotificationCenter.default.post(
+                name: .macParakeetAIFormatterDidFinish,
+                object: nil,
+                userInfo: ["source": "dictation"]
+            )
+        }
+
+        let promptTemplate = aiFormatterPromptTemplate()
+        // Normalize before comparing: `AIFormatter.renderPrompt` passes the
+        // template through `normalizedPromptTemplate` before sending, which
+        // trims whitespace and folds legacy-v1 prompts back onto the current
+        // default. Raw comparison would report those cases as custom prompts
+        // even though the LLM sees the shipped default.
+        let defaultPromptUsed = AIFormatter.normalizedPromptTemplate(promptTemplate)
+            == AIFormatter.defaultPromptTemplate
         do {
             let formatted = try await llmService.formatTranscript(
                 transcript: text,
-                promptTemplate: aiFormatterPromptTemplate()
+                promptTemplate: promptTemplate,
+                source: .dictation,
+                defaultPromptUsed: defaultPromptUsed
             )
             let trimmed = formatted.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
@@ -489,7 +517,16 @@ public actor DictationService: DictationServiceProtocol {
             if error is CancellationError {
                 throw error
             }
-            logger.error("AI formatter failed error=\(error.localizedDescription, privacy: .public)")
+            logger.warning("AI formatter failed; falling back to standard cleanup error=\(error.localizedDescription, privacy: .public)")
+            let message = "\(error.localizedDescription) Used standard cleanup."
+            NotificationCenter.default.post(
+                name: .macParakeetAIFormatterWarning,
+                object: nil,
+                userInfo: [
+                    "source": "dictation",
+                    "message": message,
+                ]
+            )
             return nil
         }
     }

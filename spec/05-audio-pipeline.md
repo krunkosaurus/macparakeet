@@ -129,7 +129,7 @@ User pastes YouTube URL
 ```
 System Audio → Core Audio Taps → Aggregate Device → Buffer Callback ─┐
                                                                       ├→ MeetingAudioCaptureService
-Mic Input    → AVAudioEngine (VPIO preferred) → Input Node Tap ──────┘   (AsyncStream<MeetingAudioCaptureEvent>)
+Mic Input    → AVAudioEngine (raw tap) → Input Node Tap ─────────────┘   (AsyncStream<MeetingAudioCaptureEvent>)
                                                           │
                                                           ▼
                                               MeetingAudioStorageWriter
@@ -141,8 +141,8 @@ Mic Input    → AVAudioEngine (VPIO preferred) → Input Node Tap ────�
                                                           │
                                                           ▼
                                    MicConditioner:
-                                   - VPIOConditioner (default when VPIO active)
-                                   - SoftwareAECConditioner (fallback when VPIO unavailable/disabled)
+                                   - SoftwareAECConditioner (default)
+                                   - VPIOConditioner (explicit opt-in only)
                                                           │
                                                           ▼
                                               LiveChunkTranscriber
@@ -151,16 +151,17 @@ Mic Input    → AVAudioEngine (VPIO preferred) → Input Node Tap ────�
                                                           ▼ (on stop)
                                               AudioFileConverter (FFmpeg mix)
                                               → meeting.m4a (stereo dual-source when both tracks exist)
-                                              → convert to 16kHz mono WAV → Parakeet STT
+                                              → separate source-file STT + aligned merge
 ```
 
 - **System audio** is captured via Core Audio Taps (`CATapDescription` + `AudioHardwareCreateProcessTap`), available on macOS 14.2+
-- **Mic audio** is captured via `AVAudioEngine` input node tap with a typed policy (`MeetingMicProcessingMode`): `vpioPreferred` (default), `vpioRequired`, or `raw`.
-- `vpioPreferred` attempts `setVoiceProcessingEnabled(true)` and falls back to raw capture with warning telemetry/log context when unavailable; `vpioRequired` fails startup if VPIO cannot be enabled.
+- **Mic audio** is captured via `AVAudioEngine` input node tap with a typed policy (`MeetingMicProcessingMode`): `raw` (default), `vpioPreferred`, or `vpioRequired`.
+- MacParakeet ships meeting capture in `raw` mode by default. VPIO remains available only as explicit opt-in plumbing; it is not used in production because the app's Core Audio process tap and VPIO do not coexist reliably in the same process. See `docs/research/vpio-process-tap-conflict.md`.
 - Both streams are captured within the same meeting session and aligned by host time. `CaptureOrchestrator` owns join + offset + chunk boundaries via `MeetingAudioPairJoiner` + `AudioChunker`.
-- Mic conditioning is policy-driven: `VPIOConditioner` is default when VPIO is active; `SoftwareAECConditioner` (NLMS) is retained strictly as fallback when VPIO is unavailable/disabled.
-- Audio is stored as separate M4A files (AAC 64kbps, 16kHz mono) per source
+- Mic conditioning is policy-driven: `SoftwareAECConditioner` (NLMS) is the shipped default for meeting capture, while `VPIOConditioner` remains as an explicit opt-in pass-through for the dormant VPIO path.
+- Audio is stored as separate M4A files (AAC 64kbps, 48kHz mono) per source
 - After recording stops, microphone + system M4As are merged into `meeting.m4a`. Dual-input sessions preserve source separation as stereo (`L=mic`, `R=system`), while single-input sessions remain mono.
+- Final meeting STT does **not** transcribe `meeting.m4a`. It transcribes `microphone.m4a` and `system.m4a` separately, then merges those fresh results by persisted `MeetingSourceAlignment`. `meeting.m4a` is kept as the playback/export artifact. See `docs/research/meeting-dual-stream-transcription-pipeline.md` for the full pipeline and tradeoffs.
 - Live chunk enqueue keeps a conservative guard: when recent system energy strongly dominates processed mic energy for a short freshness window, mic chunks are skipped for live transcription only. Mic audio is still written to disk and included in final mix/output.
 - Joiner queue overflow, long-session sync lag, and runtime capture failures are emitted as diagnostics for observability (`MeetingAudioCaptureEvent.error` where available).
 
@@ -169,12 +170,14 @@ Mic Input    → AVAudioEngine (VPIO preferred) → Input Node Tap ────�
 | Component | Purpose |
 |-----------|---------|
 | `SystemAudioTap` | Core Audio Taps wrapper — creates aggregate device, provides buffer callback |
-| `MicrophoneCapture` | AVAudioEngine mic wrapper with explicit VPIO policy + effective-mode reporting |
+| `MicrophoneCapture` | AVAudioEngine mic wrapper with explicit mic-processing policy + effective-mode reporting |
 | `MeetingAudioCaptureService` | Actor combining both streams into `AsyncStream<MeetingAudioCaptureEvent>` with `.bufferingNewest(2048)` and runtime error emission where available |
 | `CaptureOrchestrator` | Owns ingest/join/offset/chunk flow for live preview |
-| `MicConditioner` | Mic cleanup abstraction (`VPIOConditioner` default, `SoftwareAECConditioner` fallback) |
+| `MicConditioner` | Mic cleanup abstraction (`SoftwareAECConditioner` default, `VPIOConditioner` opt-in pass-through) |
 | `LiveChunkTranscriber` | Owns live chunk queueing, cancellation, ordering, STT invocation |
 | `MeetingAudioStorageWriter` | Writes separate M4A files per source (mic + system) |
+| `MeetingRecordingMetadataStore` | Persists `MeetingSourceAlignment` for post-stop merge correctness |
+| `MeetingTranscriptFinalizer` | Merges fresh per-source STT results into the final meeting transcript |
 
 ### Meeting Recording Flow
 
@@ -187,9 +190,14 @@ User clicks "Start Meeting Recording"
     → Consume AsyncStream<MeetingAudioCaptureEvent>, write buffers to M4A files
     → User clicks Stop
     → Stop capture, finalize `microphone.m4a` + `system.m4a`
+    → Persist `meeting-recording-metadata.json` with per-source alignment
     → Merge streams into `meeting.m4a` (stereo for dual input; mono for single input)
-    → Convert mixed meeting audio → 16kHz mono WAV via FFmpeg
-    → Send the mixed WAV to FluidAudio STT (CoreML/ANE) for batch transcription
+    → Convert `microphone.m4a` → 16kHz mono WAV via FFmpeg
+    → Send mic WAV to FluidAudio STT (CoreML/ANE)
+    → Convert `system.m4a` → 16kHz mono WAV via FFmpeg
+    → Send system WAV to FluidAudio STT (CoreML/ANE)
+    → Merge fresh per-source STT using persisted source offsets
+    → Optionally refine the isolated system side with diarization
     → Save as Transcription with sourceType = .meeting
     → Navigate to transcription detail view
 ```
@@ -198,9 +206,10 @@ User clicks "Start Meeting Recording"
 
 ```
 ~/Library/Application Support/MacParakeet/meeting-recordings/{uuid}/
-    ├── microphone.m4a    # Mic audio (AAC, 16kHz mono)
-    ├── system.m4a        # System audio (AAC, 16kHz mono)
-    └── meeting.m4a       # Final playback/transcription artifact (stereo dual-source when both tracks exist)
+    ├── microphone.m4a    # Mic audio (AAC, 48kHz mono)
+    ├── system.m4a        # System audio (AAC, 48kHz mono)
+    ├── meeting.m4a       # Final playback/export artifact (stereo dual-source when both tracks exist; legacy fallback for downstream tools)
+    └── meeting-recording-metadata.json  # Persisted source timing/alignment for post-stop merge
 ```
 
 Audio files are kept by default. Users can delete manually from the transcription detail view.
@@ -212,7 +221,7 @@ Meeting recording and dictation run concurrently as fully independent pipelines.
 | Flow | Engine | Notes |
 |------|--------|-------|
 | Dictation | `AudioRecorder.audioEngine` | Created/destroyed per dictation session |
-| Meeting mic | `MicrophoneCapture.audioEngine` | Long-lived, runs for entire meeting; VPIO-first policy with explicit fallback behavior feeds `CaptureOrchestrator` |
+| Meeting mic | `MicrophoneCapture.audioEngine` | Long-lived, runs for entire meeting; raw mic capture feeds `CaptureOrchestrator` while software AEC + transcript-layer suppression handle speaker bleed |
 
 macOS Core Audio's HAL natively multiplexes microphone access — multiple engines tapping the same physical mic is a supported pattern. There is no shared audio engine or audio broker.
 
@@ -220,7 +229,8 @@ All STT work routes through a process-wide scheduler and a single shared Parakee
 
 - dictation on its own reserved interactive slot
 - meeting live preview best-effort under backlog, with immediate post-stop finalization prioritized on the shared background slot
-- file / YouTube transcription, plus saved-meeting retranscribes, queued behind meeting work on that same background slot
+- file / YouTube transcription, plus legacy saved-meeting fallbacks without archived metadata, queued behind meeting work on that same background slot
+- saved meetings with archived source metadata reuse the same `meetingFinalize` path as immediate post-stop finalization
 
 The primary concurrency use case remains meeting recording + dictation. File transcription may coexist architecturally, but it should never degrade dictation responsiveness.
 
@@ -229,7 +239,7 @@ The primary concurrency use case remains meeting recording + dictation. File tra
 In Phase 2, an `AudioChunker` (ported from Oatmeal) buffers audio into 5-second chunks with 1-second overlap and sends them to Parakeet during recording. This provides:
 - Live transcript preview in the recording pill
 - Free speaker diarization: mic chunks → "Me", system chunks → "Them"
-- VPIO-first conditioning (software AEC fallback only when VPIO is unavailable/disabled) plus a residual safeguard that suppresses clearly system-dominant mic chunks in live preview windows
+- Software AEC conditioning plus a residual safeguard that suppresses clearly system-dominant mic chunks in live preview windows
 - Immediate transcript availability when recording stops
 
 ---
@@ -261,6 +271,6 @@ In Phase 2, an `AudioChunker` (ported from Oatmeal) buffers audio into 5-second 
 | STT input | WAV | 16kHz | Mono | Float32 |
 | Long-term storage (dictation) | WAV | 16kHz | Mono | Float32 |
 | File import (temp) | WAV | 16kHz | Mono | Float32 |
-| Meeting mic storage | M4A (AAC) | 16kHz | Mono | 64kbps |
-| Meeting system audio storage | M4A (AAC) | 16kHz | Mono | 64kbps |
+| Meeting mic storage | M4A (AAC) | 48kHz | Mono | 64kbps |
+| Meeting system audio storage | M4A (AAC) | 48kHz | Mono | 64kbps |
 | Meeting STT input (temp) | WAV | 16kHz | Mono | Float32 |

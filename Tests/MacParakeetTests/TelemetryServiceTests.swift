@@ -278,8 +278,7 @@ final class TelemetryServiceTests: XCTestCase {
                 wordCount: 240,
                 speakerCount: 3,
                 diarizationRequested: true,
-                diarizationApplied: true,
-                meetingPreparedTranscriptUsed: true
+                diarizationApplied: true
             ),
             appVer: "0.4.2",
             osVer: "15.3",
@@ -301,7 +300,6 @@ final class TelemetryServiceTests: XCTestCase {
         XCTAssertEqual(props["speaker_count"], "3")
         XCTAssertEqual(props["diarization_requested"], "true")
         XCTAssertEqual(props["diarization_applied"], "true")
-        XCTAssertEqual(props["meeting_prepared_transcript_used"], "true")
     }
 
     func testTranscriptionFailedSerializesStage() throws {
@@ -449,8 +447,7 @@ final class TelemetryServiceTests: XCTestCase {
                 wordCount: 120,
                 speakerCount: 2,
                 diarizationRequested: true,
-                diarizationApplied: true,
-                meetingPreparedTranscriptUsed: nil
+                diarizationApplied: true
             ),
             .transcriptionCancelled(source: .youtube, audioDurationSeconds: 45.0, stage: .stt),
             .transcriptionFailed(source: .file, stage: .audioConversion, errorType: "transcribe"),
@@ -459,6 +456,23 @@ final class TelemetryServiceTests: XCTestCase {
             .llmPromptResultFailed(provider: "openai", errorType: "auth"),
             .llmChatUsed(provider: "openai", messageCount: 3),
             .llmChatFailed(provider: "openai", errorType: "network"),
+            .llmFormatterUsed(
+                provider: "lmstudio",
+                source: .dictation,
+                durationSeconds: 1.2,
+                inputChars: 480,
+                outputChars: 512,
+                defaultPromptUsed: true,
+                inputTruncated: false
+            ),
+            .llmFormatterFailed(
+                provider: "lmstudio",
+                source: .transcription,
+                durationSeconds: 0.4,
+                errorType: "network",
+                defaultPromptUsed: false,
+                inputTruncated: true
+            ),
             .historySearched,
             .historyReplayed,
             .copyToClipboard(source: .transcription),
